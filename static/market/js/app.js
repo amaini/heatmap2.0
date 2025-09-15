@@ -345,7 +345,8 @@
     } catch(_){}
     // Click -> open Move Sector modal (ignore tile-actions clicks)
     div.addEventListener('click', (ev) => {
-      if (ev.target && ev.target.closest && ev.target.closest('.tile-actions')) return;
+      const tgt = (ev.target && ev.target.nodeType === 3) ? ev.target.parentElement : ev.target;
+      if (tgt && tgt.closest && tgt.closest('.tile-actions')) return;
       openMoveTickerModal(t);
     });
     return div;
@@ -542,7 +543,8 @@
 
   // Heatmap delegated actions for edit/delete sector/ticker
   heatmapEl.addEventListener('click', (e) => {
-    const btnRefT = e.target.closest && e.target.closest('[data-refresh-ticker]');
+    const base = (e.target && e.target.nodeType === 3) ? e.target.parentElement : e.target;
+    const btnRefT = base && base.closest && base.closest('[data-refresh-ticker]');
     if (btnRefT){
       const id = Number(btnRefT.getAttribute('data-refresh-ticker'));
       const tickers = loadLS(LS.tickers, {data:[]}).data;
@@ -550,14 +552,14 @@
       if (t) refreshSingleTicker(t).catch(console.warn);
       e.stopPropagation(); return;
     }
-    const btnEditSec = e.target.closest('[data-edit-sector]');
+    const btnEditSec = base && base.closest && base.closest('[data-edit-sector]');
     if (btnEditSec){
       const id = Number(btnEditSec.getAttribute('data-edit-sector'));
       const sectors = loadLS(LS.sectors, {data:[]}).data;
       const s = sectors.find(x => x.id === id); if (s) openSectorModal(s);
       e.stopPropagation(); return;
     }
-    const btnDelSec = e.target.closest('[data-del-sector]');
+    const btnDelSec = base && base.closest && base.closest('[data-del-sector]');
     if (btnDelSec){
       const id = Number(btnDelSec.getAttribute('data-del-sector'));
       if (!confirm('Delete this sector and its tickers?')) return;
@@ -572,14 +574,14 @@
         .catch(e => alert('Error deleting sector: ' + (e.message || '')));
       e.stopPropagation(); return;
     }
-    const btnEditT = e.target.closest('[data-edit-ticker]');
+    const btnEditT = base && base.closest && base.closest('[data-edit-ticker]');
     if (btnEditT){
       const id = Number(btnEditT.getAttribute('data-edit-ticker'));
       const t = (loadLS(LS.tickers, {data:[]}).data).find(x => x.id === id);
       if (t) openTickerModal(t);
       e.stopPropagation(); return;
     }
-    const btnDelT = e.target.closest('[data-del-ticker]');
+    const btnDelT = base && base.closest && base.closest('[data-del-ticker]');
     if (btnDelT){
       const id = Number(btnDelT.getAttribute('data-del-ticker'));
       if (!confirm('Delete this ticker?')) return;

@@ -160,8 +160,14 @@ body {
 .tile-actions .icon:hover { background: rgba(255,255,255,.08); }
 
 /* Hide tile action buttons until hover */
-.tile .tile-actions { opacity: 0; transform: translateY(-2px); pointer-events: none; transition: opacity .15s ease, transform .15s ease; }
-.tile:hover .tile-actions { opacity: 1; transform: translateY(0); pointer-events: auto; }
+/* Show actions on hover for mouse devices; always accessible on touch */
+@media (hover: hover) {
+  .tile .tile-actions { opacity: 0; transform: translateY(-2px); pointer-events: none; transition: opacity .15s ease, transform .15s ease; }
+  .tile:hover .tile-actions { opacity: 1; transform: translateY(0); pointer-events: auto; }
+}
+@media (hover: none) {
+  .tile .tile-actions { opacity: 1; transform: none; pointer-events: auto; }
+}
 
 /* Drag & drop highlights */
 .tiles.drop-target { outline: 2px dashed #2a3a52; outline-offset: 4px; border-radius: 8px; }
