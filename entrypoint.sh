@@ -46,27 +46,38 @@ python manage.py collectstatic --noinput || true
 if [ -n "${DJANGO_SUPERUSER_USERNAME:-}" ] && [ -n "${DJANGO_SUPERUSER_PASSWORD:-}" ]; then
   echo "Ensuring Django superuser ${DJANGO_SUPERUSER_USERNAME} exists..."
   python - <<'PY'
-import os
-from django.contrib.auth import get_user_model
+import os, sys
+import django
 
-User = get_user_model()
-username = os.environ.get('DJANGO_SUPERUSER_USERNAME')
-email = os.environ.get('DJANGO_SUPERUSER_EMAIL') or f"{username}@example.com"
-password = os.environ.get('DJANGO_SUPERUSER_PASSWORD')
+# Ensure settings are configured; environment usually provides this
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'heatmap.settings')
 
-u, created = User.objects.get_or_create(username=username, defaults={
-    'email': email,
-    'is_staff': True,
-    'is_superuser': True,
-})
-if not created:
-    # Make sure it retains admin privileges
-    u.is_staff = True
-    u.is_superuser = True
-u.email = email
-u.set_password(password)
-u.save()
-print(f"Superuser '{username}' {'created' if created else 'updated'}.")
+try:
+    django.setup()
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    username = os.environ.get('DJANGO_SUPERUSER_USERNAME')
+    email = os.environ.get('DJANGO_SUPERUSER_EMAIL') or f"{username}@example.com"
+    password = os.environ.get('DJANGO_SUPERUSER_PASSWORD')
+
+    u, created = User.objects.get_or_create(username=username, defaults={
+        'email': email,
+        'is_staff': True,
+        'is_superuser': True,
+    })
+    if not created:
+        # Make sure it retains admin privileges
+        u.is_staff = True
+        u.is_superuser = True
+    u.email = email
+    u.set_password(password)
+    u.save()
+    print(f"Superuser '{username}' {'created' if created else 'updated'}.")
+except Exception as e:
+    # Don't crash the container if admin creation has an issue
+    print(f"Superuser creation skipped: {e}")
+    # Intentionally do not raise; continue startup
 PY
 fi
 
