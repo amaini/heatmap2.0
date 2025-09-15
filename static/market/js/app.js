@@ -496,6 +496,11 @@
     try {
       const actions = div.querySelector('.tile-actions');
       if (actions){
+        // Extra safety: stop propagation on the action bar itself (captures early)
+        try { actions.addEventListener('click', (e) => e.stopPropagation(), true); } catch(_){}
+        try { actions.addEventListener('pointerdown', (e) => e.stopPropagation(), true); } catch(_){}
+        try { actions.addEventListener('mousedown', (e) => e.stopPropagation(), true); } catch(_){}
+
         const refBtn = actions.querySelector('[data-refresh-ticker]');
         if (refBtn){
           try { refBtn.type = 'button'; } catch(_) { refBtn.setAttribute('type','button'); }
@@ -515,7 +520,7 @@
           delBtn.addEventListener('click', async (ev) => {
             ev.preventDefault(); ev.stopPropagation();
             if (!confirm('Delete this ticker?')) return;
-            try { await deleteTickerById(t.id); } catch(e){ alert('Error deleting ticker: ' + (e.message || '')); }
+            try { await deleteTickerById(t.id); alert('Ticker deleted'); } catch(e){ alert('Error deleting ticker: ' + (e.message || '')); }
           });
         }
       }
