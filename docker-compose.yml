@@ -12,6 +12,8 @@ services:
       - GUNICORN_WORKERS=3
       - SQLITE_DIR=/app/db
       - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
+      - DJANGO_SUPERUSER_USERNAME=admin
+      - DJANGO_SUPERUSER_PASSWORD=Zx56400772
     volumes:
       - heatmap_static:/app/staticfiles
       - heatmap_db:/app/db

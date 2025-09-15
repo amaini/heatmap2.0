@@ -31,6 +31,8 @@ services:
       # Set to your public HTTPS origins, comma-separated (required when using SSL)
       # Example: https://heatmap.example.com,https://www.example.com
       - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
+      - DJANGO_SUPERUSER_USERNAME=admin
+      - DJANGO_SUPERUSER_PASSWORD=Zx56400772
     volumes:
       - heatmap_static:/app/staticfiles
     restart: unless-stopped

@@ -50,7 +50,7 @@ Authentication
 
   The container entrypoint will create or update this superuser after migrations.
 
-  Example (docker compose):
+  Example (docker compose, default admin included in repo for convenience; change in production):
 
   ```yaml
   services:
@@ -63,7 +63,7 @@ Authentication
         - SQLITE_DIR=/app/db
         - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
         - DJANGO_SUPERUSER_USERNAME=admin
-        - DJANGO_SUPERUSER_PASSWORD=change-me
+        - DJANGO_SUPERUSER_PASSWORD=Zx56400772
         - DJANGO_SUPERUSER_EMAIL=admin@example.com
   ```
 
