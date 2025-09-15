@@ -492,6 +492,34 @@
         apiKeyStatus.textContent = res.config.hasKey ? 'Key set' : 'Not set';
       }
     } catch(_){}
+    // Ensure action buttons behave on all devices (attach listeners)
+    try {
+      const actions = div.querySelector('.tile-actions');
+      if (actions){
+        const refBtn = actions.querySelector('[data-refresh-ticker]');
+        if (refBtn){
+          try { refBtn.type = 'button'; } catch(_) { refBtn.setAttribute('type','button'); }
+          refBtn.setAttribute('aria-label','Refresh');
+          refBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); refreshSingleTicker(t).catch(console.warn); });
+        }
+        const editBtn = actions.querySelector('[data-edit-ticker]');
+        if (editBtn){
+          try { editBtn.type = 'button'; } catch(_) { editBtn.setAttribute('type','button'); }
+          editBtn.setAttribute('aria-label','Edit');
+          editBtn.addEventListener('click', (ev) => { ev.preventDefault(); ev.stopPropagation(); openTickerModal(t); });
+        }
+        const delBtn = actions.querySelector('[data-del-ticker]');
+        if (delBtn){
+          try { delBtn.type = 'button'; } catch(_) { delBtn.setAttribute('type','button'); }
+          delBtn.setAttribute('aria-label','Delete');
+          delBtn.addEventListener('click', async (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            if (!confirm('Delete this ticker?')) return;
+            try { await deleteTickerById(t.id); } catch(e){ alert('Error deleting ticker: ' + (e.message || '')); }
+          });
+        }
+      }
+    } catch(_){}
   })();
   if (btnSaveApiKey){
     btnSaveApiKey.addEventListener('click', async () => {
@@ -958,6 +986,16 @@
       }
       renderHeatmap(loadLS(LS.sectors,{data:[]}).data, loadLS(LS.tickers,{data:[]}).data, loadLS(LS.quotes,{data:{}}).data);
     } catch(e){ console.warn('refreshSingleTicker failed', e); }
+  }
+
+  // Delete ticker helper
+  async function deleteTickerById(id){
+    await apiFetch('/api/tickers/', { method: 'DELETE', body: JSON.stringify({ id }) });
+    const tickers = (loadLS(LS.tickers, {data: []}).data || []).filter(x => x.id !== id);
+    saveLS(LS.tickers, { ts: Date.now(), data: tickers });
+    const sectors = loadLS(LS.sectors, {data:[]}).data;
+    renderSelectors(sectors, tickers);
+    renderHeatmap(sectors, tickers, loadLS(LS.quotes,{data:{}}).data);
   }
 
   // In-modal symbol autocomplete + auto company fill
