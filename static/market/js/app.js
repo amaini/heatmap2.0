@@ -121,10 +121,19 @@
   }
 
   function setConn(status, message){
-    connEl.classList.remove('connected','error');
-    if (status === 'connected'){ connEl.textContent = message || 'Connected ✅'; connEl.classList.add('connected'); }
-    else if (status === 'error'){ connEl.textContent = message || 'Error ❌'; connEl.classList.add('error'); }
-    else { connEl.textContent = message || 'Connecting…'; }
+    connEl.classList.remove('connected','error','warning');
+    if (status === 'connected'){
+      connEl.textContent = message || 'Connected ✅';
+      connEl.classList.add('connected');
+    } else if (status === 'warning'){
+      connEl.textContent = message || 'Partial ⚠️';
+      connEl.classList.add('warning');
+    } else if (status === 'error'){
+      connEl.textContent = message || 'Error ❌';
+      connEl.classList.add('error');
+    } else {
+      connEl.textContent = message || 'Connecting…';
+    }
   }
 
   function showSkeleton(count){
@@ -355,6 +364,16 @@
 
   // Refresh logic
   let refreshTimer = null; let countdownTimer = null; let nextAt = null;
+  function updateConnTooltip(okCount, errCount, totalCount, tookMs){
+    try {
+      const parts = [];
+      if (typeof okCount === 'number' && typeof totalCount === 'number') parts.push(`${okCount}/${totalCount} quotes`);
+      else if (typeof okCount === 'number') parts.push(`${okCount} quotes`);
+      if (typeof errCount === 'number') parts.push(`${errCount} errors`);
+      if (typeof tookMs === 'number') parts.push(`${tookMs} ms`);
+      connEl.title = `API status — ${parts.join(', ')}`;
+    } catch(_){ /* noop */ }
+  }
   function setAutoRefresh(seconds){
     if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
     if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
@@ -378,11 +397,20 @@
     const start = performance.now();
     try {
       const res = await apiFetch('/api/quotes', { method: 'POST', body: JSON.stringify({ symbols }) });
-      console.log('[quotes]', { tookMs: Math.round(performance.now() - start), size: Object.keys(res.quotes || {}).length, errors: res.errors });
+      const tookMs = Math.round(performance.now() - start);
+      console.log('[quotes]', { tookMs, size: Object.keys(res.quotes || {}).length, errors: res.errors });
       saveLS(LS.quotes, { ts: Date.now(), data: res.quotes });
       renderHeatmap(loadLS(LS.sectors, {data:[]}).data, tickers, res.quotes);
       lastRefreshEl.textContent = `Last: ${new Date().toLocaleTimeString()}`;
-      setConn(Object.keys(res.errors||{}).length ? 'error' : 'connected');
+      const errCount = Object.keys(res.errors || {}).length;
+      const gotCount = Object.keys(res.quotes || {}).length;
+      updateConnTooltip(gotCount, errCount, symbols.length, tookMs);
+      // If we received some quotes but also some errors, show a warning (degraded) state
+      if (errCount > 0 && gotCount > 0) {
+        setConn('warning');
+      } else {
+        setConn(errCount ? 'error' : 'connected');
+      }
       updateMarketStatus(res.marketStatus);
     } catch (e) {
       console.warn('quotes error', e);
@@ -390,8 +418,10 @@
       if (Object.keys(cached).length){
         renderHeatmap(loadLS(LS.sectors, {data:[]}).data, tickers, cached);
         showError('Using cached quotes due to error: ' + (e.message || ''));
+        updateConnTooltip(Object.keys(cached).length, 1, symbols.length, Math.round(performance.now() - start));
       } else {
         showError('Failed to refresh quotes: ' + (e.message || ''));
+        updateConnTooltip(0, 1, symbols.length, Math.round(performance.now() - start));
       }
       setConn('error');
     } finally {

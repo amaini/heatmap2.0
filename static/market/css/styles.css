@@ -45,6 +45,7 @@ body {
 .app-header .right { display: flex; align-items: center; gap: 12px; }
 .connection { font-size: 13px; color: var(--muted); }
 .connection.connected { color: var(--success); }
+.connection.warning { color: var(--warning); }
 .connection.error { color: var(--danger); }
 .muted { color: var(--muted); font-size: 12px; }
 
