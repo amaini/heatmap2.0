@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: your-registry/your-namespace/stocks-heatmap:latest
+    image: ghcr.io/amaini/heatmap:latest
     depends_on:
       - db
     ports:
