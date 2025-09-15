@@ -1,0 +1,13 @@
+﻿{
+    "python.defaultInterpreterPath":  ".venv\\\\Scripts\\\\python.exe",
+    "python.terminal.activateEnvironment":  true,
+    "files.watcherExclude":  {
+                                 "**/.venv/**":  true
+                             },
+    "search.exclude":  {
+                           "**/.venv/**":  true
+                       },
+    "python.analysis.exclude":  [
+                                    "**/.venv/**"
+                                ]
+}

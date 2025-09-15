@@ -1,0 +1,22 @@
+version: '3.9'
+services:
+  web:
+    build: .
+    image: stocks-heatmap:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_SETTINGS_MODULE=heatmap.settings
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+      - ALLOWED_HOSTS=*
+      - GUNICORN_WORKERS=3
+      - SQLITE_DIR=/app/db
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
+    volumes:
+      - heatmap_static:/app/staticfiles
+      - heatmap_db:/app/db
+    restart: unless-stopped
+
+volumes:
+  heatmap_static:
+  heatmap_db:
