@@ -81,14 +81,19 @@ body {
 .sector { grid-column: 1 / -1; }
 .sector-title { margin: 12px 0 8px 0; color: var(--muted); font-size: 14px; }
 .tiles { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; grid-auto-flow: dense; }
-.tile { background: transparent; border: 1px solid rgba(255,255,255,.10); border-radius: 12px; padding: 12px; padding-bottom: 64px; min-height: 150px; position: relative; transition: transform .12s ease, padding .15s ease, box-shadow .2s ease; cursor: pointer; overflow: hidden; will-change: transform; }
-.tile::before { content: ''; position: absolute; inset: 0; border-radius: inherit; opacity: var(--tile-opacity); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)); z-index: 0; background: linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,.06)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 6px 20px rgba(0,0,0,.25); }
+.tile { background: transparent; border: 1px solid rgba(255,255,255,.10); border-radius: 12px; padding: 12px; padding-bottom: 64px; min-height: 150px; position: relative; cursor: pointer; overflow: hidden; will-change: transform; transform-origin: center; backface-visibility: hidden;
+  /* Explicit base transform so hover animates smoothly in all browsers */
+  transform: translateY(0) scale(1) translateZ(0);
+  transition: transform .22s cubic-bezier(.2,.6,.2,1), padding .15s ease, box-shadow .22s ease;
+}
+.tile::before { content: ''; position: absolute; inset: 0; border-radius: inherit; opacity: var(--tile-opacity); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)); z-index: 0; background: linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,.06)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 6px 20px rgba(0,0,0,.25); transition: opacity .18s ease, transform .18s ease; }
 .tile::after { content: ''; position: absolute; inset: 0; border-radius: inherit; z-index: 0; pointer-events: none; opacity: var(--tile-tint-opacity, 0.28); }
 .tile.gain::after { background: var(--tile-green); }
 .tile.loss::after { background: var(--tile-red); }
 .tile.flat::after { background: var(--tile-neutral); }
 .tile > * { position: relative; z-index: 1; }
-.tiles .tile:hover { grid-column: span 2; transform: translateY(-2px); z-index: 10; padding-bottom: 64px; box-shadow: 0 8px 26px rgba(0,0,0,.35); }
+.tiles .tile:hover { transform: translateY(-2px) scale(1.04); z-index: 10; padding-bottom: 64px; box-shadow: 0 8px 26px rgba(0,0,0,.35); }
+.tiles .tile:hover::before { transform: scale(1.01); }
 .tile:hover::before { opacity: var(--tile-opacity-hover); }
 
 @supports not ((backdrop-filter: blur(1px))) {
@@ -155,18 +160,16 @@ body {
 /* Slightly lower the Day bar on hover to create tiny top margin */
 .tile:hover .progress.day { bottom: 6px; }
 
-.tile-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 6px; }
-.tile-actions .icon { background: rgba(0,0,0,.2); color: #cfe2ff; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; width: 24px; height: 22px; line-height: 18px; font-size: 14px; text-align: center; cursor: pointer; }
+.tile-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 6px; z-index: 5; padding: 4px; margin: -4px; }
+.tile-actions .icon { background: rgba(0,0,0,.2); color: #cfe2ff; border: 1px solid rgba(255,255,255,.15); border-radius: 6px; width: 28px; height: 28px; line-height: 24px; font-size: 16px; text-align: center; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .tile-actions .icon:hover { background: rgba(255,255,255,.08); }
 
-/* Hide tile action buttons until hover */
-/* Show actions on hover for mouse devices; always accessible on touch */
-@media (hover: hover) {
-  .tile .tile-actions { opacity: 0; transform: translateY(-2px); pointer-events: none; transition: opacity .15s ease, transform .15s ease; }
-  .tile:hover .tile-actions { opacity: 1; transform: translateY(0); pointer-events: auto; }
-}
+/* Keep actions always interactive; soften visibility when not hovered */
+.tile .tile-actions { opacity: .85; transform: translateY(0); pointer-events: auto; transition: opacity .15s ease; }
+.tile:hover .tile-actions { opacity: 1; }
+/* Larger tap targets on touch devices */
 @media (hover: none) {
-  .tile .tile-actions { opacity: 1; transform: none; pointer-events: auto; }
+  .tile-actions .icon { width: 32px; height: 32px; line-height: 28px; font-size: 18px; }
 }
 
 /* Drag & drop highlights */
