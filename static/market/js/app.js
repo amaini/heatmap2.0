@@ -95,10 +95,10 @@
     trackRequest();
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), (cfg.timeout || 10) * 1000);
-    const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+    const headers = Object.assign({ 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, opts.headers || {});
     if (opts.method && opts.method !== 'GET') headers['X-CSRFToken'] = cfg.csrftoken || '';
     try {
-      const res = await fetch(url, Object.assign({}, opts, { headers, signal: controller.signal }));
+      const res = await fetch(url, Object.assign({ credentials: 'same-origin' }, opts, { headers, signal: controller.signal }));
       clearTimeout(id);
       if (!res.ok) {
         let body = {};
