@@ -19,6 +19,8 @@
     sidebar: 'hm.sidebarCollapsed.v1',
   };
 
+  const INITIAL_REFRESH_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+
   // Elements
   const heatmapEl = document.getElementById('heatmap');
   const connEl = document.getElementById('connStatus');
@@ -390,6 +392,27 @@
   }
   function scheduleNext(s){ nextAt = Date.now() + s * 1000; updateCountdown(); }
   function updateCountdown(){ if (!nextAt) return; const ms = Math.max(0, nextAt - Date.now()); const sec = Math.round(ms/1000); nextRefreshEl.textContent = `Next: ${sec}s`; }
+  function getCachedQuotesState(){
+    const cached = loadLS(LS.quotes, null);
+    if (!cached) return null;
+    const ts = Number(cached.ts);
+    if (!Number.isFinite(ts)) return null;
+    return { ts, data: cached.data || {} };
+  }
+  function applyCachedRefreshState(cache){
+    if (!cache) return;
+    try { lastRefreshEl.textContent = `Last: ${new Date(cache.ts).toLocaleTimeString()}`; } catch(_){ }
+    const count = cache.data && typeof cache.data === 'object' ? Object.keys(cache.data).length : 0;
+    const timestamp = new Date(cache.ts).toLocaleString();
+    const summary = count ? `${count} tickers` : 'No quotes';
+    connEl.title = `Using cached quotes (${summary}) at ${timestamp}`;
+    if (!connEl.classList.contains('error')) { setConn('connected', 'Connected (cached)'); }
+  }
+  function shouldSkipInitialRefresh(cache){
+    if (!cache) return false;
+    const age = Date.now() - cache.ts;
+    return Number.isFinite(age) && age < INITIAL_REFRESH_COOLDOWN_MS;
+  }
 
   async function doRefresh(){
     clearError(); setConn('connecting'); btnRefresh.disabled = true; refreshSpinner.hidden = false;
@@ -785,9 +808,17 @@
   autoRefreshSel.value = savedAuto;
   setAutoRefresh(savedAuto);
 
-  // Initial load and first refresh
-  loadInitial().then(() => doRefresh());
+  const cachedBeforeInit = getCachedQuotesState();
+  if (cachedBeforeInit) {
+    try { lastRefreshEl.textContent = `Last: ${new Date(cachedBeforeInit.ts).toLocaleTimeString()}`; } catch(_){ }
+  }
 
+  // Initial load and first refresh (skips API call if cache is fresh)
+  loadInitial().then(() => {
+    const cached = getCachedQuotesState();
+    if (shouldSkipInitialRefresh(cached)) { applyCachedRefreshState(cached); return; }
+    return doRefresh();
+  });
   // Helper: ensure tickers available; optionally fetch from API when empty
   async function ensureTickersLoaded(forceFetch){
     let tickers = (loadLS(LS.tickers, {data: []}).data) || [];
@@ -1185,5 +1216,3 @@
     if (formColors) formColors.addEventListener('submit', (e) => { e.preventDefault(); save(); try { e.target.dataset.dirty='0'; } catch(_){} if (modalColors) closeModal(modalColors); });
   })();
 })();
-
-
