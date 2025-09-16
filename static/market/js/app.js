@@ -378,20 +378,69 @@
     } catch(_){ /* noop */ }
   }
   function setAutoRefresh(seconds){
-    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    clearRefreshTimeout();
+    stopCountdownTimer();
     saveLS(LS.autoRefresh, seconds);
-    if (seconds && seconds !== 'off'){
-      const s = Number(seconds);
-      scheduleNext(s);
-      refreshTimer = setInterval(() => { scheduleNext(s); doRefresh(); }, s * 1000);
-      countdownTimer = setInterval(() => updateCountdown(), 1000);
+    const s = normalizeSeconds(seconds);
+    if (s){
+      scheduleAutoRefresh(s);
     } else {
-      nextRefreshEl.textContent = '—';
+      resetNextRefreshLabel();
     }
   }
   function scheduleNext(s){ nextAt = Date.now() + s * 1000; updateCountdown(); }
   function updateCountdown(){ if (!nextAt) return; const ms = Math.max(0, nextAt - Date.now()); const sec = Math.round(ms/1000); nextRefreshEl.textContent = `Next: ${sec}s`; }
+  function normalizeSeconds(value){
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  function clearRefreshTimeout(){
+    if (refreshTimer){
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+  function stopCountdownTimer(){
+    if (countdownTimer){
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+  }
+  function startCountdownTimer(){
+    if (!countdownTimer){
+      countdownTimer = setInterval(() => updateCountdown(), 1000);
+    }
+  }
+  function resetNextRefreshLabel(){
+    nextAt = null;
+    nextRefreshEl.textContent = '--';
+  }
+  function scheduleAutoRefresh(seconds){
+    const s = normalizeSeconds(seconds);
+    if (!s){
+      clearRefreshTimeout();
+      stopCountdownTimer();
+      resetNextRefreshLabel();
+      return;
+    }
+    clearRefreshTimeout();
+    scheduleNext(s);
+    startCountdownTimer();
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      doRefresh({ source: 'auto' }).finally(() => scheduleAutoRefresh(s));
+    }, s * 1000);
+  }
+  function restartAutoRefreshCountdown(){
+    const s = normalizeSeconds(autoRefreshSel.value);
+    if (!s){
+      clearRefreshTimeout();
+      stopCountdownTimer();
+      resetNextRefreshLabel();
+      return;
+    }
+    scheduleAutoRefresh(s);
+  }
   function getCachedQuotesState(){
     const cached = loadLS(LS.quotes, null);
     if (!cached) return null;
@@ -414,7 +463,9 @@
     return Number.isFinite(age) && age < INITIAL_REFRESH_COOLDOWN_MS;
   }
 
-  async function doRefresh(){
+  async function doRefresh(opts = {}){
+    const source = opts.source || 'manual';
+    if (source !== 'auto') restartAutoRefreshCountdown();
     clearError(); setConn('connecting'); btnRefresh.disabled = true; refreshSpinner.hidden = false;
     const tickers = (loadLS(LS.tickers, {data: []}).data) || [];
     const symbols = tickers.map(t => t.symbol);
