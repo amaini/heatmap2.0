@@ -20,6 +20,8 @@
   };
 
   const INITIAL_REFRESH_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+  const FINNHUB_RATE_LIMIT_PER_MIN = 60;
+  const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
   // Elements
   const heatmapEl = document.getElementById('heatmap');
@@ -35,6 +37,7 @@
   const marketStatusEl = document.getElementById('marketStatus');
   const skeletonEl = document.getElementById('loadingSkeleton');
   const errorBox = document.getElementById('errorBox');
+  const rateLimitEl = document.getElementById('rateLimit');
 
   const searchInput = document.getElementById('searchInput');
   const searchResults = document.getElementById('searchResults');
@@ -85,11 +88,66 @@
 
   // Rate limit tracker
   let reqCount = 0;
-  let windowStart = Date.now();
-  function trackRequest(){
+  let windowStart = null;
+  function ensureRateLimitWindow(){
+    if (windowStart === null) return;
     const now = Date.now();
-    if (now - windowStart > 60_000){ windowStart = now; reqCount = 0; }
+    if (now - windowStart >= RATE_LIMIT_WINDOW_MS){
+      windowStart = null;
+      reqCount = 0;
+    }
+  }
+  function rateLimitSnapshot(){
+    ensureRateLimitWindow();
+    const limit = FINNHUB_RATE_LIMIT_PER_MIN;
+    if (windowStart === null){
+      const remaining = Math.max(0, limit - reqCount);
+      return { used: reqCount, remaining, resetInMs: 0, active: false };
+    }
+    const now = Date.now();
+    const resetInMs = Math.max(0, RATE_LIMIT_WINDOW_MS - (now - windowStart));
+    const remaining = Math.max(0, limit - reqCount);
+    return { used: reqCount, remaining, resetInMs, active: true };
+  }
+  function formatRateLimitReset(snapshot){
+    if (!snapshot.active) return '--';
+    const secs = Math.ceil(snapshot.resetInMs / 1000);
+    return secs <= 0 ? '0s' : `${secs}s`;
+  }
+  function updateRateLimitDisplay(snapshot){
+    if (!rateLimitEl) return;
+    const limit = FINNHUB_RATE_LIMIT_PER_MIN;
+    const snap = snapshot || rateLimitSnapshot();
+    const remaining = Math.max(0, snap.remaining);
+    const resetLabel = formatRateLimitReset(snap);
+    const baseText = `Requests left: ${remaining}/${limit}`;
+    rateLimitEl.textContent = snap.active ? `${baseText} (reset ${resetLabel})` : baseText;
+    rateLimitEl.title = `Finnhub limit ${limit}/min - used ${snap.used}, resets in ${resetLabel}`;
+    rateLimitEl.classList.toggle('warning', snap.active && remaining > 0 && remaining <= 5);
+    rateLimitEl.classList.toggle('error', snap.active && remaining <= 0);
+  }
+  function startRateLimitTicker(){
+    if (!rateLimitEl) return;
+    if (rateLimitTimer) return;
+    rateLimitTimer = setInterval(() => {
+      const snap = rateLimitSnapshot();
+      updateRateLimitDisplay(snap);
+      if (!snap.active){
+        clearInterval(rateLimitTimer);
+        rateLimitTimer = null;
+      }
+    }, 1000);
+  }
+  function trackRequest(){
+    ensureRateLimitWindow();
+    if (windowStart === null){
+      windowStart = Date.now();
+      reqCount = 0;
+    }
     reqCount += 1;
+    const snap = rateLimitSnapshot();
+    updateRateLimitDisplay(snap);
+    if (snap.active) startRateLimitTicker();
   }
 
   // Simple API helper with timeout + retry
@@ -366,7 +424,7 @@
   }
 
   // Refresh logic
-  let refreshTimer = null; let countdownTimer = null; let nextAt = null;
+  let refreshTimer = null; let countdownTimer = null; let nextAt = null; let rateLimitTimer = null;
   function updateConnTooltip(okCount, errCount, totalCount, tookMs){
     try {
       const parts = [];
@@ -858,6 +916,7 @@
   const savedAuto = loadLS(LS.autoRefresh, 'off');
   autoRefreshSel.value = savedAuto;
   setAutoRefresh(savedAuto);
+  updateRateLimitDisplay();
 
   const cachedBeforeInit = getCachedQuotesState();
   if (cachedBeforeInit) {
