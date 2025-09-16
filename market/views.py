@@ -289,6 +289,33 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
         max_workers = 1
 
     cached_entries = {c.symbol: c for c in CachedQuote.objects.filter(symbol__in=symbols)}
+
+    quote_ttl = getattr(settings, "FINNHUB_QUOTE_TTL_SECONDS", 10)
+    try:
+        quote_ttl = int(quote_ttl)
+    except (TypeError, ValueError):
+        quote_ttl = 10
+    if quote_ttl < 0:
+        quote_ttl = 0
+
+    fresh_cached: Dict[str, Dict[str, Any]] = {}
+    symbols_to_fetch: List[str] = []
+    for sym in symbols:
+        cached = cached_entries.get(sym)
+        use_cache = False
+        if cached and quote_ttl > 0 and cached.fetched_at:
+            try:
+                age = (now - cached.fetched_at).total_seconds()
+            except Exception:
+                age = None
+            if age is not None and age < quote_ttl:
+                cached_payload = cached.data if isinstance(cached.data, dict) else {}
+                if cached_payload:
+                    fresh_cached[sym] = dict(cached_payload)
+                    use_cache = True
+        if not use_cache:
+            symbols_to_fetch.append(sym)
+
     quotes: Dict[str, Dict[str, Any]] = {}
     errors: Dict[str, str] = {}
 
@@ -301,10 +328,10 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
             return f"{prefix}: {exc}"
         return str(exc)
 
-    if symbols:
-        worker_count = min(max_workers, len(symbols))
+    if symbols_to_fetch:
+        worker_count = min(max_workers, len(symbols_to_fetch))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            future_map = {executor.submit(client.quote, sym): sym for sym in symbols}
+            future_map = {executor.submit(client.quote, sym): sym for sym in symbols_to_fetch}
             for future in as_completed(future_map):
                 sym = future_map[future]
                 try:
@@ -352,7 +379,7 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
 
     for sym in symbols:
         cached = cached_entries.get(sym)
-        cached_data = cached.data if cached else {}
+        cached_data = cached.data if cached and isinstance(cached.data, dict) else {}
         quote_obj = quote_results.get(sym)
         if quote_obj:
             payload = {
@@ -385,13 +412,30 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
             CachedQuote.objects.update_or_create(symbol=sym, defaults={"data": payload})
             if sym in metrics_errors:
                 errors[sym] = f"{format_error(metrics_errors[sym])} (kept cached metrics)"
-        else:
-            if cached_data:
-                quotes[sym] = cached_data
-                if sym in quote_errors:
-                    errors[sym] = f"{format_error(quote_errors[sym])} (using cached)"
-            elif sym in quote_errors:
-                errors[sym] = format_error(quote_errors[sym])
+            continue
+
+        if sym in fresh_cached:
+            payload = dict(fresh_cached.get(sym, {}))
+            metrics_payload = metrics_results.get(sym)
+            if metrics_payload:
+                payload.update({
+                    "week52High": metrics_payload.get("week52High"),
+                    "week52Low": metrics_payload.get("week52Low"),
+                    "metricsAsOf": now_ts,
+                })
+                if cached:
+                    CachedQuote.objects.filter(symbol=sym).update(data=payload)
+            quotes[sym] = payload
+            if sym in metrics_errors:
+                errors[sym] = f"{format_error(metrics_errors[sym])} (kept cached metrics)"
+            continue
+
+        if cached_data:
+            quotes[sym] = cached_data
+            if sym in quote_errors:
+                errors[sym] = f"{format_error(quote_errors[sym])} (using cached)"
+        elif sym in quote_errors:
+            errors[sym] = format_error(quote_errors[sym])
 
     status = compute_us_market_status()
     payload = {
