@@ -118,6 +118,8 @@ FINNHUB_BASE_URL = os.environ.get('FINNHUB_BASE_URL', 'https://finnhub.io/api/v1
 FINNHUB_TIMEOUT_SECONDS = int(os.environ.get('FINNHUB_TIMEOUT_SECONDS', '10'))
 FINNHUB_MAX_RETRIES = int(os.environ.get('FINNHUB_MAX_RETRIES', '3'))
 FINNHUB_BACKOFF_FACTOR = float(os.environ.get('FINNHUB_BACKOFF_FACTOR', '0.75'))
+FINNHUB_METRICS_TTL_SECONDS = int(os.environ.get('FINNHUB_METRICS_TTL_SECONDS', '21600'))
+FINNHUB_MAX_CONCURRENCY = int(os.environ.get('FINNHUB_MAX_CONCURRENCY', '4'))
 
 # CSRF in local dev
 def _parse_list_env(name: str) -> list[str]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
@@ -257,8 +258,6 @@ def api_search(request: HttpRequest) -> JsonResponse:
 
 @require_http_methods(["GET", "POST"])
 def api_quotes(request: HttpRequest) -> JsonResponse:
-    # Symbols from body or default to DB tickers
-    symbols: List[str]
     if request.method == "POST":
         try:
             data = json.loads(request.body.decode("utf-8")) if request.body else {}
@@ -272,51 +271,132 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
         symbols = list(Ticker.objects.values_list("symbol", flat=True))
 
     client = FinnhubClient()
+    now = timezone.now()
+    now_ts = int(now.timestamp())
+
+    metrics_ttl = getattr(settings, "FINNHUB_METRICS_TTL_SECONDS", 21600)
+    try:
+        metrics_ttl = int(metrics_ttl)
+    except (TypeError, ValueError):
+        metrics_ttl = 21600
+
+    max_workers = getattr(settings, "FINNHUB_MAX_CONCURRENCY", 4)
+    try:
+        max_workers = int(max_workers)
+    except (TypeError, ValueError):
+        max_workers = 4
+    if max_workers < 1:
+        max_workers = 1
+
+    cached_entries = {c.symbol: c for c in CachedQuote.objects.filter(symbol__in=symbols)}
     quotes: Dict[str, Dict[str, Any]] = {}
     errors: Dict[str, str] = {}
-    now = timezone.now()
+
+    quote_results: Dict[str, Quote] = {}
+    quote_errors: Dict[str, FinnhubError | Exception] = {}
+
+    def format_error(exc: FinnhubError | Exception) -> str:
+        if isinstance(exc, FinnhubError):
+            prefix = exc.code or "ERROR"
+            return f"{prefix}: {exc}"
+        return str(exc)
+
+    if symbols:
+        worker_count = min(max_workers, len(symbols))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {executor.submit(client.quote, sym): sym for sym in symbols}
+            for future in as_completed(future_map):
+                sym = future_map[future]
+                try:
+                    quote_results[sym] = future.result()
+                except FinnhubError as exc:
+                    quote_errors[sym] = exc
+                except Exception as exc:
+                    quote_errors[sym] = FinnhubError(str(exc))
+
+    metrics_symbols: List[str] = []
+    if metrics_ttl <= 0:
+        metrics_symbols = [sym for sym in symbols if sym not in quote_errors]
+    else:
+        for sym in symbols:
+            if sym in quote_errors:
+                continue
+            cached = cached_entries.get(sym)
+            cached_data = cached.data if cached else {}
+            raw_ts = None
+            if cached_data:
+                raw_ts = cached_data.get("metricsAsOf") or cached_data.get("metrics_as_of")
+            metrics_ts = None
+            if raw_ts is not None:
+                try:
+                    metrics_ts = int(float(raw_ts))
+                except (TypeError, ValueError):
+                    metrics_ts = None
+            if metrics_ts is None or (now_ts - metrics_ts) >= metrics_ttl:
+                metrics_symbols.append(sym)
+
+    metrics_results: Dict[str, Dict[str, Any]] = {}
+    metrics_errors: Dict[str, FinnhubError] = {}
+    if metrics_symbols:
+        worker_count = min(max_workers, len(metrics_symbols))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {executor.submit(client.metrics, sym): sym for sym in metrics_symbols}
+            for future in as_completed(future_map):
+                sym = future_map[future]
+                try:
+                    metrics_results[sym] = future.result()
+                except FinnhubError as exc:
+                    metrics_errors[sym] = exc
+                except Exception as exc:
+                    metrics_errors[sym] = FinnhubError(str(exc))
 
     for sym in symbols:
-        try:
-            q = client.quote(sym)
-            quotes[sym] = {
-                "c": q.c,
-                "pc": q.pc,
-                "h": q.h,
-                "l": q.l,
-                "dp": q.dp,
-                "d": q.d,
-                "t": q.t,
-                "pre": q.pre,
-                "post": q.post,
+        cached = cached_entries.get(sym)
+        cached_data = cached.data if cached else {}
+        quote_obj = quote_results.get(sym)
+        if quote_obj:
+            payload = {
+                "c": quote_obj.c,
+                "pc": quote_obj.pc,
+                "h": quote_obj.h,
+                "l": quote_obj.l,
+                "dp": quote_obj.dp,
+                "d": quote_obj.d,
+                "t": quote_obj.t,
+                "pre": quote_obj.pre,
+                "post": quote_obj.post,
             }
-            # 52-week metrics
-            try:
-                m = client.metrics(sym)
-                quotes[sym].update({
-                    "week52High": m.get("week52High"),
-                    "week52Low": m.get("week52Low"),
+            metrics_payload = metrics_results.get(sym)
+            if metrics_payload:
+                payload.update({
+                    "week52High": metrics_payload.get("week52High"),
+                    "week52Low": metrics_payload.get("week52Low"),
+                    "metricsAsOf": now_ts,
                 })
-            except FinnhubError:
-                pass
-            # Persist cache for fallback
-            CachedQuote.objects.update_or_create(
-                symbol=sym,
-                defaults={"data": quotes[sym]}
-            )
-        except FinnhubError as e:
-            # Try cached fallback
-            cached = CachedQuote.objects.filter(symbol=sym).first()
-            if cached:
-                quotes[sym] = cached.data
-                errors[sym] = f"{e.code or 'ERROR'}: {e} (using cached)"
             else:
-                errors[sym] = f"{e.code or 'ERROR'}: {e}"
+                if cached_data:
+                    if "week52High" in cached_data:
+                        payload["week52High"] = cached_data.get("week52High")
+                    if "week52Low" in cached_data:
+                        payload["week52Low"] = cached_data.get("week52Low")
+                    if "metricsAsOf" in cached_data:
+                        payload["metricsAsOf"] = cached_data.get("metricsAsOf")
+            quotes[sym] = payload
+            CachedQuote.objects.update_or_create(symbol=sym, defaults={"data": payload})
+            if sym in metrics_errors:
+                errors[sym] = f"{format_error(metrics_errors[sym])} (kept cached metrics)"
+        else:
+            if cached_data:
+                quotes[sym] = cached_data
+                if sym in quote_errors:
+                    errors[sym] = f"{format_error(quote_errors[sym])} (using cached)"
+            elif sym in quote_errors:
+                errors[sym] = format_error(quote_errors[sym])
 
     status = compute_us_market_status()
     payload = {
         "ok": True,
-        "asOf": int(now.timestamp()),
+        "asOf": now_ts,
         "marketStatus": status,
         "quotes": quotes,
         "errors": errors,
