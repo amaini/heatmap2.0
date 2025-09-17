@@ -94,6 +94,7 @@ class CachedQuote(models.Model):
 
 class SiteConfig(models.Model):
     finnhub_api_key = models.CharField(max_length=128, blank=True, default="")
+    preferences = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def masked_key(self) -> str:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
@@ -18,6 +20,106 @@ from django.views.decorators.http import require_GET, require_http_methods
 from .forms import PurchaseLotForm, SectorForm, TickerForm
 from .models import CachedQuote, PurchaseLot, Sector, Ticker, SiteConfig
 from .services.finnhub import FinnhubClient, FinnhubError, Quote, compute_us_market_status
+
+
+PREFERENCE_COLOR_KEYS = ("gain", "flat", "loss")
+
+
+def _coerce_auto_refresh(value: Any) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return seconds if seconds > 0 else 0
+
+
+def _sanitize_tile_colors(data: Any) -> Dict[str, str]:
+    colors: Dict[str, str] = {}
+    if not isinstance(data, dict):
+        return colors
+    for key in PREFERENCE_COLOR_KEYS:
+        raw = data.get(key)
+        if isinstance(raw, str):
+            val = raw.strip()
+            if val:
+                colors[key] = val[:32]
+    return colors
+
+
+def _filter_preferences(data: Any) -> Dict[str, Any]:
+    prefs: Dict[str, Any] = {}
+    if not isinstance(data, dict):
+        return prefs
+    if "autoRefreshSeconds" in data:
+        prefs["autoRefreshSeconds"] = _coerce_auto_refresh(data.get("autoRefreshSeconds"))
+    colors = _sanitize_tile_colors(data.get("tileColors"))
+    if colors:
+        prefs["tileColors"] = colors
+    return prefs
+
+
+def _merge_preferences(existing: Any, update: Any) -> Dict[str, Any]:
+    merged = _filter_preferences(existing)
+    new_values = _filter_preferences(update)
+    if new_values:
+        merged.update(new_values)
+    return merged
+
+
+RATE_LIMIT_WINDOW_SECONDS = 60
+_rate_lock = Lock()
+_rate_window_start: float | None = None
+_rate_used = 0
+
+
+def _get_rate_limit_setting() -> int:
+    try:
+        value = int(getattr(settings, "FINNHUB_RATE_LIMIT_PER_MIN", 60))
+    except (TypeError, ValueError):
+        value = 60
+    return value
+
+
+def _rate_limit_snapshot() -> Dict[str, int]:
+    limit = _get_rate_limit_setting()
+    if limit <= 0:
+        return {"limit": 0, "used": 0, "remaining": 0, "resetIn": 0}
+    now = time.monotonic()
+    with _rate_lock:
+        if _rate_window_start is None or (now - _rate_window_start) >= RATE_LIMIT_WINDOW_SECONDS:
+            return {"limit": limit, "used": 0, "remaining": limit, "resetIn": 0}
+        remaining = max(0, limit - _rate_used)
+        reset_in = int(max(0, RATE_LIMIT_WINDOW_SECONDS - (now - _rate_window_start)))
+        return {"limit": limit, "used": min(limit, _rate_used), "remaining": remaining, "resetIn": reset_in}
+
+
+def _reserve_quote_slots(requested: int) -> Tuple[int, Dict[str, int]]:
+    limit = _get_rate_limit_setting()
+    if limit <= 0:
+        snapshot = {"limit": limit, "used": 0, "remaining": 0, "resetIn": 0, "requested": requested, "granted": requested}
+        return requested, snapshot
+    now = time.monotonic()
+    global _rate_window_start, _rate_used
+    with _rate_lock:
+        if _rate_window_start is None or (now - _rate_window_start) >= RATE_LIMIT_WINDOW_SECONDS:
+            _rate_window_start = now
+            _rate_used = 0
+        available = max(0, limit - _rate_used)
+        granted = min(requested, available)
+        _rate_used += granted
+        remaining = max(0, limit - _rate_used)
+        reset_in = int(max(0, RATE_LIMIT_WINDOW_SECONDS - (now - _rate_window_start)))
+        snapshot = {
+            "limit": limit,
+            "used": min(limit, _rate_used),
+            "remaining": remaining,
+            "resetIn": reset_in,
+            "requested": requested,
+            "granted": granted,
+        }
+    return granted, snapshot
+
+
 
 
 @login_required
@@ -328,6 +430,32 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
             return f"{prefix}: {exc}"
         return str(exc)
 
+    total_requested = len(symbols_to_fetch)
+    rate_limited_symbols: List[str] = []
+    rate_limit_info: Dict[str, Any] | None = None
+
+    if symbols_to_fetch:
+        allowed, rate_limit_info = _reserve_quote_slots(total_requested)
+        if allowed < total_requested:
+            rate_limited_symbols = symbols_to_fetch[allowed:]
+            symbols_to_fetch = symbols_to_fetch[:allowed]
+            for sym in rate_limited_symbols:
+                cached = cached_entries.get(sym)
+                if cached and isinstance(cached.data, dict):
+                    fresh_cached[sym] = dict(cached.data)
+        rate_limit_info["requested"] = total_requested
+        rate_limit_info["granted"] = allowed
+        rate_limit_info["skipped"] = len(rate_limited_symbols)
+    else:
+        rate_limit_info = _rate_limit_snapshot()
+        rate_limit_info.update({"requested": 0, "granted": 0, "skipped": 0})
+
+    rate_limited_set = set(rate_limited_symbols)
+    rate_limit_error = "RATE_LIMIT: Using cached data (Finnhub limit reached)"
+    reset_hint = rate_limit_info.get("resetIn") if rate_limit_info else None
+    if isinstance(reset_hint, (int, float)) and reset_hint > 0:
+        rate_limit_error = f"RATE_LIMIT: Using cached data (resets in {int(reset_hint)}s)"
+
     if symbols_to_fetch:
         worker_count = min(max_workers, len(symbols_to_fetch))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -343,10 +471,10 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
 
     metrics_symbols: List[str] = []
     if metrics_ttl <= 0:
-        metrics_symbols = [sym for sym in symbols if sym not in quote_errors]
+        metrics_symbols = [sym for sym in symbols if sym not in quote_errors and sym not in rate_limited_set]
     else:
         for sym in symbols:
-            if sym in quote_errors:
+            if sym in quote_errors or sym in rate_limited_set:
                 continue
             cached = cached_entries.get(sym)
             cached_data = cached.data if cached else {}
@@ -410,7 +538,9 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
                         payload["metricsAsOf"] = cached_data.get("metricsAsOf")
             quotes[sym] = payload
             CachedQuote.objects.update_or_create(symbol=sym, defaults={"data": payload})
-            if sym in metrics_errors:
+            if sym in rate_limited_set:
+                errors[sym] = rate_limit_error
+            elif sym in metrics_errors:
                 errors[sym] = f"{format_error(metrics_errors[sym])} (kept cached metrics)"
             continue
 
@@ -426,24 +556,39 @@ def api_quotes(request: HttpRequest) -> JsonResponse:
                 if cached:
                     CachedQuote.objects.filter(symbol=sym).update(data=payload)
             quotes[sym] = payload
-            if sym in metrics_errors:
+            if sym in rate_limited_set:
+                errors[sym] = rate_limit_error
+            elif sym in metrics_errors:
                 errors[sym] = f"{format_error(metrics_errors[sym])} (kept cached metrics)"
             continue
 
         if cached_data:
             quotes[sym] = cached_data
-            if sym in quote_errors:
+            if sym in rate_limited_set:
+                errors[sym] = rate_limit_error
+            elif sym in quote_errors:
                 errors[sym] = f"{format_error(quote_errors[sym])} (using cached)"
         elif sym in quote_errors:
             errors[sym] = format_error(quote_errors[sym])
+        elif sym in rate_limited_set:
+            errors[sym] = rate_limit_error
 
     status = compute_us_market_status()
+    if rate_limit_info is None:
+        rate_limit_info = _rate_limit_snapshot()
+        rate_limit_info.update({"requested": total_requested, "granted": 0, "skipped": len(rate_limited_symbols)})
+    else:
+        rate_limit_info.setdefault("requested", total_requested)
+        rate_limit_info.setdefault("granted", total_requested - len(rate_limited_symbols))
+        rate_limit_info.setdefault("skipped", len(rate_limited_symbols))
+
     payload = {
         "ok": True,
         "asOf": now_ts,
         "marketStatus": status,
         "quotes": quotes,
         "errors": errors,
+        "rateLimit": rate_limit_info,
     }
     return JsonResponse(payload)
 
@@ -453,25 +598,56 @@ def api_market_status(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"ok": True, "status": compute_us_market_status()})
 
 
-@require_http_methods(["GET", "POST", "PUT"]) 
+@require_http_methods(["GET", "POST", "PUT"])
 def api_config(request: HttpRequest) -> JsonResponse:
-    # Create or fetch single config row
     cfg, _ = SiteConfig.objects.get_or_create(id=1)
     if request.method == "GET":
-        masked = cfg.masked_key()
+        prefs = _filter_preferences(cfg.preferences or {})
         return JsonResponse({
             "ok": True,
             "config": {
-                "hasKey": bool(cfg.finnhub_api_key.strip()),
-                "masked": masked,
+                "hasKey": bool((cfg.finnhub_api_key or "").strip()),
+                "masked": cfg.masked_key(),
                 "updated_at": int(cfg.updated_at.timestamp()) if cfg.updated_at else None,
-            }
+                "preferences": prefs,
+            },
         })
+
     try:
         data = json.loads(request.body.decode("utf-8")) if request.body else {}
     except Exception:
         return _json_error("Invalid JSON body")
-    new_key = (data.get("finnhub_api_key") or "").strip()
-    cfg.finnhub_api_key = new_key
-    cfg.save(update_fields=["finnhub_api_key", "updated_at"])
-    return JsonResponse({"ok": True, "config": {"hasKey": bool(new_key), "masked": cfg.masked_key()}})
+
+    update_fields: List[str] = []
+    current_prefs = _filter_preferences(cfg.preferences or {})
+
+    if "finnhub_api_key" in data:
+        raw_key = data.get("finnhub_api_key")
+        if isinstance(raw_key, str):
+            new_key = raw_key.strip()
+        elif raw_key is None:
+            new_key = ""
+        else:
+            new_key = str(raw_key).strip()
+        cfg.finnhub_api_key = new_key
+        update_fields.append("finnhub_api_key")
+
+    if "preferences" in data:
+        merged = _merge_preferences(current_prefs, data.get("preferences"))
+        if merged != current_prefs:
+            cfg.preferences = merged
+            current_prefs = merged
+            update_fields.append("preferences")
+
+    if update_fields:
+        if "updated_at" not in update_fields:
+            update_fields.append("updated_at")
+        cfg.save(update_fields=update_fields)
+
+    response_config = {
+        "hasKey": bool((cfg.finnhub_api_key or "").strip()),
+        "masked": cfg.masked_key(),
+        "updated_at": int(cfg.updated_at.timestamp()) if cfg.updated_at else None,
+        "preferences": _filter_preferences(cfg.preferences or current_prefs),
+    }
+    return JsonResponse({"ok": True, "config": response_config})

@@ -19,9 +19,14 @@
     sidebar: 'hm.sidebarCollapsed.v1',
   };
 
+  const serverState = { preferences: {} };
+  let applyServerTileColors = function noopApplyTileColors(){ /* replaced later */ };
+
   const INITIAL_REFRESH_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
-  const FINNHUB_RATE_LIMIT_PER_MIN = 60;
+  let FINNHUB_RATE_LIMIT_PER_MIN = 60;
   const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+  const QUOTE_BATCH_SIZE = 15;
+  const QUOTE_BATCH_DELAY_MS = 400; // spread requests to respect quotas
 
   // Elements
   const heatmapEl = document.getElementById('heatmap');
@@ -150,6 +155,38 @@
     if (snap.active) startRateLimitTicker();
   }
 
+  function syncRateLimitFromServer(info){
+    if (!info || !rateLimitEl) return;
+    const serverLimit = Number(info.limit);
+    if (Number.isFinite(serverLimit) && serverLimit > 0){
+      FINNHUB_RATE_LIMIT_PER_MIN = serverLimit;
+    }
+    const limit = FINNHUB_RATE_LIMIT_PER_MIN;
+    let used = Number(info.used);
+    let remaining = Number(info.remaining);
+    if (!Number.isFinite(remaining)) {
+      remaining = Number.isFinite(used) ? Math.max(0, limit - used) : Math.max(0, limit - reqCount);
+    }
+    if (!Number.isFinite(used)) {
+      used = Math.max(0, limit - remaining);
+    }
+    if (Number.isFinite(used)) {
+      reqCount = Math.max(0, Math.min(limit, used));
+    }
+    const resetSec = Number(info.resetIn);
+    if (Number.isFinite(resetSec)) {
+      const clamped = Math.max(0, Math.min(RATE_LIMIT_WINDOW_MS, resetSec * 1000));
+      if (clamped === 0) {
+        windowStart = null;
+      } else {
+        windowStart = Date.now() - (RATE_LIMIT_WINDOW_MS - clamped);
+      }
+    }
+    const snap = rateLimitSnapshot();
+    updateRateLimitDisplay(snap);
+    if (snap.active) startRateLimitTicker();
+  }
+
   // Simple API helper with timeout + retry
   async function apiFetch(url, opts = {}, retry = 2) {
     trackRequest();
@@ -208,6 +245,7 @@
 
   function saveLS(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
   function loadLS(key, fallback){ try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch(e){ return fallback; } }
+  function delay(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
 
   async function loadInitial(){
     setConn('connecting');
@@ -435,7 +473,22 @@
       connEl.title = `API status — ${parts.join(', ')}`;
     } catch(_){ /* noop */ }
   }
-  function setAutoRefresh(seconds){
+  async function persistPreferences(partial){
+    if (!partial || typeof partial !== 'object') return;
+    try {
+      const res = await apiFetch('/api/config', { method: 'PUT', body: JSON.stringify({ preferences: partial }) });
+      if (res && res.config && res.config.preferences){
+        serverState.preferences = res.config.preferences;
+      } else {
+        serverState.preferences = Object.assign({}, serverState.preferences, partial);
+      }
+    } catch (err){
+      console.warn('prefs save failed', err);
+      serverState.preferences = Object.assign({}, serverState.preferences, partial);
+    }
+  }
+
+  function setAutoRefresh(seconds, opts = {}){
     clearRefreshTimeout();
     stopCountdownTimer();
     saveLS(LS.autoRefresh, seconds);
@@ -444,6 +497,10 @@
       scheduleAutoRefresh(s);
     } else {
       resetNextRefreshLabel();
+    }
+    if (opts.persist !== false){
+      const payload = { autoRefreshSeconds: s || 0 };
+      persistPreferences(payload);
     }
   }
   function scheduleNext(s){ nextAt = Date.now() + s * 1000; updateCountdown(); }
@@ -521,50 +578,112 @@
     return Number.isFinite(age) && age < INITIAL_REFRESH_COOLDOWN_MS;
   }
 
+  
+
   async function doRefresh(opts = {}){
-    const source = opts.source || 'manual';
-    if (source !== 'auto') restartAutoRefreshCountdown();
-    clearError(); setConn('connecting'); btnRefresh.disabled = true; refreshSpinner.hidden = false;
-    const tickers = (loadLS(LS.tickers, {data: []}).data) || [];
-    const symbols = tickers.map(t => t.symbol);
-    const start = performance.now();
-    try {
-      const res = await apiFetch('/api/quotes', { method: 'POST', body: JSON.stringify({ symbols }) });
-      const tookMs = Math.round(performance.now() - start);
-      console.log('[quotes]', { tookMs, size: Object.keys(res.quotes || {}).length, errors: res.errors });
-      saveLS(LS.quotes, { ts: Date.now(), data: res.quotes });
-      renderHeatmap(loadLS(LS.sectors, {data:[]}).data, tickers, res.quotes);
-      lastRefreshEl.textContent = `Last: ${new Date().toLocaleTimeString()}`;
-      const errCount = Object.keys(res.errors || {}).length;
-      const gotCount = Object.keys(res.quotes || {}).length;
-      updateConnTooltip(gotCount, errCount, symbols.length, tookMs);
-      // If we received some quotes but also some errors, show a warning (degraded) state
-      if (errCount > 0 && gotCount > 0) {
-        setConn('warning');
-      } else {
-        setConn(errCount ? 'error' : 'connected');
+      const source = opts.source || 'manual';
+      if (source !== 'auto') restartAutoRefreshCountdown();
+      clearError(); setConn('connecting'); btnRefresh.disabled = true; refreshSpinner.hidden = false;
+      const tickers = (loadLS(LS.tickers, {data: []}).data) || [];
+      const symbols = tickers.map(t => t.symbol);
+      const start = performance.now();
+      const batchSize = symbols.length ? Math.max(1, Math.min(QUOTE_BATCH_SIZE, symbols.length)) : QUOTE_BATCH_SIZE;
+      const aggregatedQuotes = {};
+      const aggregatedErrors = {};
+      let latestMarketStatus = null;
+      let lastRateLimit = null;
+      let batches = 0;
+      try {
+        if (symbols.length){
+          for (let offset = 0; offset < symbols.length; offset += batchSize){
+            const chunk = symbols.slice(offset, offset + batchSize);
+            const res = await apiFetch('/api/quotes', { method: 'POST', body: JSON.stringify({ symbols: chunk }) });
+            batches += 1;
+            Object.assign(aggregatedQuotes, res.quotes || {});
+            Object.assign(aggregatedErrors, res.errors || {});
+            if (res.marketStatus) {
+              latestMarketStatus = res.marketStatus;
+            }
+            if (res.rateLimit) {
+              lastRateLimit = res.rateLimit;
+              syncRateLimitFromServer(res.rateLimit);
+            }
+            if (offset + batchSize < symbols.length){
+              await delay(QUOTE_BATCH_DELAY_MS);
+            }
+          }
+        }
+        let quotesToUse = aggregatedQuotes;
+        const fetchedCount = Object.keys(aggregatedQuotes).length;
+        if (fetchedCount){
+          saveLS(LS.quotes, { ts: Date.now(), data: aggregatedQuotes });
+        } else {
+          const cached = loadLS(LS.quotes, { data: {} }).data || {};
+          quotesToUse = cached;
+        }
+        renderHeatmap(loadLS(LS.sectors, {data:[]}).data, tickers, quotesToUse);
+        lastRefreshEl.textContent = `Last: ${new Date().toLocaleTimeString()}`;
+        if (latestMarketStatus) updateMarketStatus(latestMarketStatus);
+        const errCount = Object.keys(aggregatedErrors).length;
+        const gotCount = Object.keys(quotesToUse).length;
+        const tookMs = Math.round(performance.now() - start);
+        console.log('[quotes]', { tookMs, batches: batches || 0, size: gotCount, errors: errCount, rateLimit: lastRateLimit });
+        updateConnTooltip(gotCount, errCount, symbols.length, tookMs);
+        if (errCount > 0 && gotCount > 0) {
+          setConn('warning');
+          showError('Partial data returned; latest available quotes shown.');
+        } else if (!fetchedCount && gotCount) {
+          setConn('warning');
+          showError('Using cached quotes while respecting rate limits.');
+        } else {
+          setConn(errCount ? 'error' : 'connected');
+          if (errCount){
+            showError('Quotes refreshed with some errors.');
+          } else {
+            clearError();
+          }
+        }
+        if (lastRateLimit) {
+          syncRateLimitFromServer(lastRateLimit);
+        }
+      } catch (e) {
+        console.warn('quotes error', e);
+        const fallback = Object.keys(aggregatedQuotes).length ? aggregatedQuotes : (loadLS(LS.quotes, { data: {} }).data || {});
+        const tookMs = Math.round(performance.now() - start);
+        if (Object.keys(fallback).length){
+          renderHeatmap(loadLS(LS.sectors, {data:[]}).data, tickers, fallback);
+          showError('Using cached quotes due to error: ' + (e.message || ''));
+          const errCount = Object.keys(aggregatedErrors).length + 1;
+          updateConnTooltip(Object.keys(fallback).length, errCount, symbols.length, tookMs);
+        } else {
+          showError('Failed to refresh quotes: ' + (e.message || ''));
+          updateConnTooltip(0, 1, symbols.length, tookMs);
+        }
+        setConn('error');
+      } finally {
+        btnRefresh.disabled = false; refreshSpinner.hidden = true;
       }
-      updateMarketStatus(res.marketStatus);
-    } catch (e) {
-      console.warn('quotes error', e);
-      const cached = loadLS(LS.quotes, { data: {} }).data;
-      if (Object.keys(cached).length){
-        renderHeatmap(loadLS(LS.sectors, {data:[]}).data, tickers, cached);
-        showError('Using cached quotes due to error: ' + (e.message || ''));
-        updateConnTooltip(Object.keys(cached).length, 1, symbols.length, Math.round(performance.now() - start));
-      } else {
-        showError('Failed to refresh quotes: ' + (e.message || ''));
-        updateConnTooltip(0, 1, symbols.length, Math.round(performance.now() - start));
+    }
+
+function updateMarketStatus(status){
+    if (!status) return; marketStatusEl.textContent = `Market: ${status.session}${status.isOpen ? ' (Open)' : ''}`;
+  }
+  function applyServerPreferences(prefs){
+    if (!prefs || typeof prefs !== 'object') return;
+    serverState.preferences = Object.assign({}, serverState.preferences, prefs);
+    if (Object.prototype.hasOwnProperty.call(prefs, 'autoRefreshSeconds')){
+      const secs = Number(prefs.autoRefreshSeconds);
+      const value = secs > 0 ? String(secs) : 'off';
+      if (autoRefreshSel){
+        autoRefreshSel.value = value;
       }
-      setConn('error');
-    } finally {
-      btnRefresh.disabled = false; refreshSpinner.hidden = true;
+      setAutoRefresh(value, { persist: false });
+    }
+    if (prefs.tileColors){
+      applyServerTileColors(prefs.tileColors, { saveLocal: true, persist: false });
     }
   }
 
-  function updateMarketStatus(status){
-    if (!status) return; marketStatusEl.textContent = `Market: ${status.session}${status.isOpen ? ' (Open)' : ''}`;
-  }
 
   // Search with debounce
   let searchTimer = null;
@@ -622,6 +741,9 @@
         // Do not prefill input to avoid showing any part of the key
         apiKeyInput.value = '';
         apiKeyStatus.textContent = res.config.hasKey ? 'Key set' : 'Not set';
+        if (res.config.preferences){
+          applyServerPreferences(res.config.preferences);
+        }
       }
     } catch(_){}
     // Ensure action buttons behave on all devices (attach listeners)
@@ -661,6 +783,9 @@
         // Clear the input after save; do not show the key
         apiKeyInput.value = '';
         apiKeyStatus.textContent = res.config.hasKey ? 'Key set' : 'Not set';
+        if (res.config && res.config.preferences){
+          applyServerPreferences(res.config.preferences);
+        }
         // Optional: refresh quotes to validate
         doRefresh();
       } catch(e){ alert('Failed to save key: ' + (e.message || '')); }
@@ -915,7 +1040,7 @@
   // Init auto-refresh from localStorage
   const savedAuto = loadLS(LS.autoRefresh, 'off');
   autoRefreshSel.value = savedAuto;
-  setAutoRefresh(savedAuto);
+  setAutoRefresh(savedAuto, { persist: false });
   updateRateLimitDisplay();
 
   const cachedBeforeInit = getCachedQuotesState();
@@ -1301,28 +1426,77 @@
   (function(){
     if (!colorGain || !colorFlat || !colorLoss) return;
     const COLORS_KEY = 'hm.tileColors.v1';
+
     function applyColors(c){
       const root = document.documentElement;
       if (c.gain) root.style.setProperty('--tile-green', c.gain);
       if (c.flat) root.style.setProperty('--tile-neutral', c.flat);
       if (c.loss) root.style.setProperty('--tile-red', c.loss);
     }
+
+    function syncInputs(c){
+      if (!c) return;
+      if (c.gain) colorGain.value = c.gain;
+      if (c.flat) colorFlat.value = c.flat;
+      if (c.loss) colorLoss.value = c.loss;
+    }
+
+    function storeLocal(c){
+      saveLS(COLORS_KEY, c);
+    }
+
+    function applyAndStore(c, opts = {}){
+      if (!c || typeof c !== 'object') return null;
+      const payload = {
+        gain: c.gain || colorGain.value,
+        flat: c.flat || colorFlat.value,
+        loss: c.loss || colorLoss.value,
+      };
+      syncInputs(payload);
+      applyColors(payload);
+      if (opts.saveLocal !== false){
+        storeLocal(payload);
+      }
+      return payload;
+    }
+
+    function saveColors(opts = {}){
+      const payload = applyAndStore({ gain: colorGain.value, flat: colorFlat.value, loss: colorLoss.value }, opts);
+      if (!payload) return;
+      if (opts.persist !== false){
+        persistPreferences({ tileColors: payload });
+      }
+      serverState.preferences = Object.assign({}, serverState.preferences, { tileColors: payload });
+    }
+
     const saved = loadLS(COLORS_KEY, null);
     if (saved){
-      colorGain.value = saved.gain || colorGain.value;
-      colorFlat.value = saved.flat || colorFlat.value;
-      colorLoss.value = saved.loss || colorLoss.value;
+      syncInputs(saved);
       applyColors(saved);
     }
-    function save(){
-      const c = { gain: colorGain.value, flat: colorFlat.value, loss: colorLoss.value };
-      saveLS(COLORS_KEY, c);
-      applyColors(c);
-    }
-    // live preview
+
     colorGain.addEventListener('input', () => applyColors({gain: colorGain.value}));
     colorFlat.addEventListener('input', () => applyColors({flat: colorFlat.value}));
     colorLoss.addEventListener('input', () => applyColors({loss: colorLoss.value}));
-    if (formColors) formColors.addEventListener('submit', (e) => { e.preventDefault(); save(); try { e.target.dataset.dirty='0'; } catch(_){} if (modalColors) closeModal(modalColors); });
+    if (formColors) formColors.addEventListener('submit', (e) => {
+      e.preventDefault();
+      saveColors();
+      try { e.target.dataset.dirty='0'; } catch(_){}
+      if (modalColors) closeModal(modalColors);
+    });
+
+    applyServerTileColors = function(colors, options = {}){
+      if (!colors || typeof colors !== 'object') return;
+      const payload = applyAndStore(colors, { saveLocal: options.saveLocal !== false });
+      if (!payload) return;
+      if (options.persist){
+        persistPreferences({ tileColors: payload });
+      }
+      serverState.preferences = Object.assign({}, serverState.preferences, { tileColors: payload });
+    };
+
+    if (serverState.preferences && serverState.preferences.tileColors){
+      applyServerTileColors(serverState.preferences.tileColors, { saveLocal: true, persist: false });
+    }
   })();
 })();

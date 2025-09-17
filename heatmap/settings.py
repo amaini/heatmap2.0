@@ -121,6 +121,7 @@ FINNHUB_BACKOFF_FACTOR = float(os.environ.get('FINNHUB_BACKOFF_FACTOR', '0.75'))
 FINNHUB_METRICS_TTL_SECONDS = int(os.environ.get('FINNHUB_METRICS_TTL_SECONDS', '21600'))
 FINNHUB_MAX_CONCURRENCY = int(os.environ.get('FINNHUB_MAX_CONCURRENCY', '4'))
 FINNHUB_QUOTE_TTL_SECONDS = int(os.environ.get('FINNHUB_QUOTE_TTL_SECONDS', '10'))
+FINNHUB_RATE_LIMIT_PER_MIN = int(os.environ.get('FINNHUB_RATE_LIMIT_PER_MIN', '60'))
 
 # CSRF in local dev
 def _parse_list_env(name: str) -> list[str]:
