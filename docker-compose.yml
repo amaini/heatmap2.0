@@ -7,13 +7,15 @@ services:
       - "8000:8000"
     environment:
       - DJANGO_SETTINGS_MODULE=heatmap.settings
-      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
-      - ALLOWED_HOSTS=*
-      - GUNICORN_WORKERS=3
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-false}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-this-secret}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-stocks.blissitek.ca,localhost,127.0.0.1}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-3}
       - SQLITE_DIR=/app/db
-      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS}
-      - DJANGO_SUPERUSER_USERNAME=admin
-      - DJANGO_SUPERUSER_PASSWORD=Zx56400772
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-https://stocks.blissitek.ca}
+      - DJANGO_SUPERUSER_USERNAME=${DJANGO_SUPERUSER_USERNAME:-admin}
+      - DJANGO_SUPERUSER_PASSWORD=${DJANGO_SUPERUSER_PASSWORD:-change-this-password}
     volumes:
       - heatmap_static:/app/staticfiles
       - heatmap_db:/app/db
