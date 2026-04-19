@@ -17,9 +17,24 @@ SECRET_KEY = os.environ.get(
     'django-insecure-heatmap-local-dev-key'
 )
 
-DEBUG = True
 
-ALLOWED_HOSTS = ['*']
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _parse_list_env(name: str) -> list[str]:
+    raw = os.environ.get(name, '').strip()
+    if not raw:
+        return []
+    return [p.strip() for p in raw.replace(';', ',').split(',') if p.strip()]
+
+
+DEBUG = _env_bool('DJANGO_DEBUG', True)
+
+ALLOWED_HOSTS = _parse_list_env('ALLOWED_HOSTS') or ['*']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -109,11 +124,7 @@ if HAS_WHITENOISE:
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Finnhub configuration
-FINNHUB_API_KEY = os.environ.get(
-    'FINNHUB_API_KEY',
-    # Provided key; you can override with env var
-    'SignUp to Finnhub'
-)
+FINNHUB_API_KEY = (os.environ.get('FINNHUB_API_KEY') or '').strip()
 FINNHUB_BASE_URL = os.environ.get('FINNHUB_BASE_URL', 'https://finnhub.io/api/v1')
 FINNHUB_TIMEOUT_SECONDS = int(os.environ.get('FINNHUB_TIMEOUT_SECONDS', '10'))
 FINNHUB_MAX_RETRIES = int(os.environ.get('FINNHUB_MAX_RETRIES', '3'))
@@ -122,15 +133,6 @@ FINNHUB_METRICS_TTL_SECONDS = int(os.environ.get('FINNHUB_METRICS_TTL_SECONDS', 
 FINNHUB_MAX_CONCURRENCY = int(os.environ.get('FINNHUB_MAX_CONCURRENCY', '4'))
 FINNHUB_QUOTE_TTL_SECONDS = int(os.environ.get('FINNHUB_QUOTE_TTL_SECONDS', '10'))
 FINNHUB_RATE_LIMIT_PER_MIN = int(os.environ.get('FINNHUB_RATE_LIMIT_PER_MIN', '60'))
-
-# CSRF in local dev
-def _parse_list_env(name: str) -> list[str]:
-    raw = os.environ.get(name, '').strip()
-    if not raw:
-        return []
-    # Support comma or semicolon separated
-    parts = [p.strip() for p in raw.replace(';', ',').split(',') if p.strip()]
-    return parts
 
 # CSRF: allow configuring trusted origins for HTTPS reverse proxies (e.g., Nginx)
 CSRF_TRUSTED_ORIGINS = _parse_list_env('CSRF_TRUSTED_ORIGINS') or [
